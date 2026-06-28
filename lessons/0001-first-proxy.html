@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第 01 课 · 启动你的第一个 LiteLLM Proxy</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <script src="../assets/quiz.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">LiteLLM Proxy 网关 · 第 01 课</p>
+  <h1>启动你的第一个 Proxy:一份配置,接通 OpenAI 与国内模型</h1>
+
+  <div class="mission">
+    <b>这一课服务于你的使命:</b>生产级网关把所有模型收敛到一个 OpenAI 兼容入口。
+    今天的目标很小但是地基——写出最小的 <code>config.yaml</code>,让一个进程同时代理
+    OpenAI 和一个国内模型,并用同一套接口调通。后面的虚拟 key、fallback、监控,全都长在这份配置之上。
+  </div>
+
+  <h2>一、心智模型:config.yaml 的四个抽屉</h2>
+  <p>
+    Proxy 的全部行为由一份 <code>config.yaml</code> 决定。它只有四个顶层段,把它们想成四个抽屉,
+    你以后查任何配置都先问"这属于哪个抽屉":<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/config_settings">[1]</a></sup>
+  </p>
+  <ul>
+    <li><code>model_list</code> — <b>有哪些模型、怎么连</b>。今天只碰这个抽屉。</li>
+    <li><code>litellm_settings</code> — 全局行为:日志、缓存、超时、回调。</li>
+    <li><code>general_settings</code> — 网关自身:master_key、数据库、预算、限流。</li>
+    <li><code>router_settings</code> — 路由策略:负载均衡、fallback、重试。</li>
+  </ul>
+  <p class="note">
+    顺序记忆法:<b>模型 → 全局 → 网关 → 路由</b>。今天只开第一个抽屉,其余三个是后续课程。
+  </p>
+
+  <h2>二、关键洞察:model_name 是"对外名",model 是"真实串"</h2>
+  <div class="key-insight">
+    <span class="label">核心抽象</span>
+    <code>model_list</code> 里每一项都有两层名字:<br>
+    • <code>model_name</code> —— 客户端调用时写的名字(你随便起,对外稳定)。<br>
+    • <code>litellm_params.model</code> —— LiteLLM 真正去调的串,格式是
+    <code>提供商/模型</code>,比如 <code>openai/gpt-4o</code>。<br>
+    这层<strong>间接</strong>正是网关的价值:应用永远只认 <code>model_name</code>;
+    底层换厂商、换模型、加备用,只改配置,应用代码一行不动。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/configs">[2]</a></sup>
+  </div>
+
+  <h3>国内模型怎么接?——"OpenAI 兼容"通法</h3>
+  <p>
+    绝大多数国内模型(DeepSeek、通义、智谱等)都提供 <b>OpenAI 兼容</b>接口。
+    通法是:<code>model</code> 写成 <code>openai/&lt;模型&gt;</code> 走 OpenAI 协议,再用
+    <code>api_base</code> 把请求指到厂商的地址。<code>api_key</code> 用
+    <code>os.environ/变量名</code> 从环境变量读,<strong>绝不写死在文件里</strong>。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/configs">[2]</a></sup>
+  </p>
+
+  <h2>三、动手:四步跑通</h2>
+  <ol class="steps">
+    <li>
+      <b>安装带 Proxy 的 LiteLLM</b>(注意是 <code>[proxy]</code> 这个 extra,不是 brew):
+      <pre><code>pip install 'litellm[proxy]'</code></pre>
+    </li>
+    <li>
+      <b>把密钥放进环境变量</b>(以 DeepSeek 作国内模型示例):
+      <pre><code>export OPENAI_API_KEY="sk-你的openai key"
+export DEEPSEEK_API_KEY="你的deepseek key"</code></pre>
+    </li>
+    <li>
+      <b>写最小 config.yaml</b>:
+      <p class="filename">config.yaml</p>
+      <pre><code>model_list:
+  # —— OpenAI ——
+  - model_name: gpt-4o            # 对外名,客户端就写这个
+    litellm_params:
+      model: openai/gpt-4o        # 真实串:提供商/模型
+      api_key: os.environ/OPENAI_API_KEY
+
+  # —— 国内模型(OpenAI 兼容 + 自定义 api_base) ——
+  - model_name: deepseek-chat
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: https://api.deepseek.com
+      api_key: os.environ/DEEPSEEK_API_KEY</code></pre>
+    </li>
+    <li>
+      <b>启动网关</b>,默认监听 <code>http://0.0.0.0:4000</code>:<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/quick_start">[3]</a></sup>
+      <pre><code>litellm --config config.yaml</code></pre>
+    </li>
+  </ol>
+
+  <h3>验证:用 OpenAI 兼容接口调它</h3>
+  <p>同一个 endpoint,只靠 <code>model</code> 字段切换底层厂商——这就是网关的全部魔力:</p>
+  <pre><code>curl http://0.0.0.0:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "用一句话介绍你自己"}]
+  }'</code></pre>
+  <p class="note">
+    把 <code>"model"</code> 改成 <code>"gpt-4o"</code>,请求就转去了 OpenAI——客户端代码完全没变。
+    这正是你将来给团队提供的体验。
+  </p>
+
+  <h2>四、检索练习</h2>
+  <p>合上上面的内容,凭记忆作答(回忆比重读更能形成长期记忆):</p>
+
+  <div class="quiz" data-explain="model_name 是对外稳定名,litellm_params.model 才是 LiteLLM 真正去调的『提供商/模型』串。">
+    <p class="q">客户端发请求时,JSON 里的 "model" 字段应该填哪一个?</p>
+    <button class="opt" data-correct>配置里的 model_name 值</button>
+    <button class="opt">litellm_params 的 model 值</button>
+    <button class="opt">环境变量里的 api_key 名</button>
+  </div>
+
+  <div class="quiz" data-explain="国内模型多走 OpenAI 兼容:model 写 openai/xxx 用协议,api_base 改地址指向厂商。">
+    <p class="q">接一个 OpenAI 兼容的国内模型,关键要额外配哪个字段?</p>
+    <button class="opt">把 routing_strategy 改掉</button>
+    <button class="opt" data-correct>设 api_base 指向厂商地址</button>
+    <button class="opt">把 cache 设置为开启</button>
+  </div>
+
+  <div class="quiz" data-explain="model_list 管『有哪些模型、怎么连』;master_key、数据库、预算属于 general_settings 抽屉。">
+    <p class="q">"网关的 master_key 和数据库" 这类配置,属于哪个顶层段?</p>
+    <button class="opt">放在 model_list 段里头</button>
+    <button class="opt">放在 router_settings 段</button>
+    <button class="opt" data-correct>放在 general_settings 段</button>
+  </div>
+
+  <div class="ask-teacher">
+    💬 <b>有疑问就问我。</b> 我是你的老师——配置报错、某个国内厂商的 <code>model</code> 串和
+    <code>api_base</code> 到底填什么、curl 调不通,直接发给我,我们一起拆。
+  </div>
+
+  <h2>下一步</h2>
+  <p>
+    <b>先读权威源</b>(本课首选阅读):
+    <a href="https://docs.litellm.ai/docs/proxy/quick_start">LiteLLM Proxy Quick Start</a>——
+    官方上手文档,15 分钟通读,把今天的四步在脑子里再走一遍。
+  </p>
+  <p>
+    把上面的 <code>config.yaml</code> 真正在你机器上跑通、两个模型都调出返回,就完成了这一课的"可见成果"。
+    跑通后告诉我,<b>第 02 课</b>我们开 <code>general_settings</code> 抽屉:
+    用 <code>master_key</code> + 虚拟 key 给不同应用发独立凭证、设预算与限流。
+  </p>
+
+  <div class="footer">
+    速查卡:<a href="../reference/config-yaml-cheatsheet.html">config.yaml 结构速查</a>　·
+    使命:<a href="../MISSION.md">MISSION.md</a>
+    <div class="next-links">
+      <span>引用来源:
+        <a href="https://docs.litellm.ai/docs/proxy/config_settings">[1] 字段参考</a>
+        <a href="https://docs.litellm.ai/docs/proxy/configs">[2] Config 教程</a>
+        <a href="https://docs.litellm.ai/docs/proxy/quick_start">[3] Quick Start</a>
+      </span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

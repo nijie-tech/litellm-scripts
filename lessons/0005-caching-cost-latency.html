@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第 05 课 · 缓存:省钱、降延迟,响应秒回</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <script src="../assets/quiz.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">LiteLLM Proxy 网关 · 第 05 课</p>
+  <h1>缓存:省钱、降延迟,重复请求秒回</h1>
+
+  <div class="mission">
+    <b>这一课服务于你的使命:</b>生产网关里大量请求是重复的(同样的提示、同样的检索片段)。
+    每次都打厂商 API 既慢又烧钱。今天给网关接上<strong>缓存</strong>:相同请求直接返回上次结果,
+    并在第 04 课的监控里<strong>亲眼看到花费曲线下降、延迟变低</strong>。
+  </div>
+
+  <h2>一、心智模型:缓存是问厂商之前先翻的"账本"</h2>
+  <p>
+    开启后,网关在调用厂商前先查缓存:命中就直接返回存好的回复,完全不打厂商 API——
+    省掉那次 token 费用,延迟从"秒级"降到"毫秒级"。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/caching">[1]</a></sup>
+    缓存配置在 <code>litellm_settings</code> 抽屉:
+  </p>
+  <pre><code>litellm_settings:
+  cache: true
+  cache_params:
+    type: redis      # 生产首选;也可 local / s3 / qdrant-semantic
+    ttl: 600         # 缓存存活 600 秒
+    namespace: my-gateway   # 可选:key 前缀,多应用隔离</code></pre>
+
+  <h2>二、关键洞察:缓存要"共享"才在生产有意义</h2>
+  <div class="key-insight">
+    <span class="label">为什么用 Redis 而不是 local</span>
+    <code>type: local</code> 是<strong>单进程内存</strong>缓存——网关一重启就清空,多实例之间也<strong>各缓存各的</strong>,命中率低。
+    生产用 <code>type: redis</code> 把缓存放进<strong>外部共享存储</strong>:重启不丢、所有网关实例共用一份。
+    这和第 02 课"虚拟 key 要落 Postgres"是同一个道理——<strong>状态要外置才能横向扩展</strong>。
+  </div>
+  <p>连 Redis 既可写在 <code>cache_params</code> 里,也可用环境变量:<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/caching">[1]</a></sup></p>
+  <pre><code>export REDIS_URL="redis://:你的密码@localhost:6379"</code></pre>
+
+  <h2>三、关键洞察:精确缓存 vs 语义缓存</h2>
+  <div class="key-insight">
+    <span class="label">两种命中方式,别搞混</span>
+    • <b>精确缓存(默认)</b> —— 请求<strong>逐字相同</strong>才命中。差一个标点就 miss。适合"完全重复"的调用。<br>
+    • <b>语义缓存(<code>qdrant-semantic</code> 等)</b> —— 按<strong>语义相近</strong>命中。"今天天气如何"和"今天天气怎样"可视为同一问。
+    命中率高,但有"答非所问"风险,需要调相似度阈值。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/caching">[1]</a></sup><br>
+    起步建议:<strong>先上精确缓存</strong>,稳了再评估语义缓存。
+  </div>
+
+  <h2>四、动手:三步验证命中</h2>
+  <ol class="steps">
+    <li>
+      <b>起一个 Redis</b>:
+      <pre><code>docker run -d --name litellm-redis -p 6379:6379 redis:7</code></pre>
+    </li>
+    <li>
+      <b>开缓存并重启网关</b>:
+      <pre><code>export REDIS_URL="redis://localhost:6379"
+litellm --config config.yaml   # config 里已写 cache: true / type: redis</code></pre>
+      先确认连通:<code>curl http://0.0.0.0:4000/cache/ping</code>
+    </li>
+    <li>
+      <b>同一请求发两次</b>,看第二次的速度与命中头:
+      <pre><code>curl -i http://0.0.0.0:4000/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"用一句话介绍缓存"}]}'</code></pre>
+      第二次应<strong>明显更快</strong>,响应头里出现 <code>x-litellm-cache-key</code> 表示命中。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/caching">[1]</a></sup>
+    </li>
+  </ol>
+  <p class="note">
+    回到第 04 课的 <code>/metrics</code> 或 Langfuse:命中的请求不产生厂商花费——你能直接看到 spend 不再增长。
+    这就是缓存价值的"可见证据"。
+  </p>
+
+  <h3>按请求微调</h3>
+  <p>个别请求想跳过缓存或改 ttl,可在请求体里覆盖:</p>
+  <pre><code>{"model":"deepseek-chat","cache":{"no-cache":true},"messages":[...]}  // 本次强制不读缓存</code></pre>
+
+  <h2>五、检索练习</h2>
+  <p>合上内容,凭记忆作答:</p>
+
+  <div class="quiz" data-explain="local 是单进程内存,重启即丢、多实例不共享;redis 外置共享存储,重启不丢、实例共用,适合生产横向扩展。">
+    <p class="q">生产环境缓存为什么首选 redis 而不是 local?</p>
+    <button class="opt">local 类型会额外多花一份钱</button>
+    <button class="opt" data-correct>redis 外置共享,重启与多实例不丢</button>
+    <button class="opt">local 类型不支持设置 ttl 时间</button>
+  </div>
+
+  <div class="quiz" data-explain="精确缓存要求请求逐字相同才命中;语义缓存按语义相近命中,差一个字也可能算同一问。">
+    <p class="q">"今天天气如何"与"今天天气怎样"可能命中同一缓存的是?</p>
+    <button class="opt">默认的精确(exact)缓存机制</button>
+    <button class="opt" data-correct>语义(semantic)缓存的匹配机制</button>
+    <button class="opt">两种缓存都会把它们当不同请求</button>
+  </div>
+
+  <div class="quiz" data-explain="命中时不调用厂商 API,因此不产生该次 token 费用,监控里 spend 不增长——这正是省钱证据。">
+    <p class="q">一次缓存命中,对花费监控的可见影响是?</p>
+    <button class="opt">spend 照常按厂商价格累加</button>
+    <button class="opt">spend 会翻倍记录命中惩罚</button>
+    <button class="opt" data-correct>spend 不增长,因为没打厂商</button>
+  </div>
+
+  <div class="ask-teacher">
+    💬 <b>有疑问就问我。</b> <code>/cache/ping</code> 不通、命中头不出现、想只对部分模型开缓存、
+    或想评估语义缓存的相似度阈值——把现象发我,我们继续拆。
+  </div>
+
+  <h2>下一步</h2>
+  <p>
+    <b>先读权威源</b>(本课首选阅读):
+    <a href="https://docs.litellm.ai/docs/proxy/caching">Caching 官方文档</a>——
+    看 <code>supported_call_types</code>、各缓存后端,以及语义缓存配置。
+  </p>
+  <p>
+    <b>可见成果:</b>同一请求两次,第二次秒回且出现 <code>x-litellm-cache-key</code>,监控里 spend 不再增长。
+    做到后告诉我下一步想走哪条:<br>
+    ① <b>多实例水平扩展</b>(Redis 共享路由状态 + 全局限流,真正的高可用);<br>
+    ② <b>user/team 分层预算</b>(在虚拟 key 之上按团队管钱);<br>
+    ③ 回头补 <b>第 05 跳过的 Docker + Postgres 生产部署</b>。
+  </p>
+
+  <div class="footer">
+    上一课:<a href="0004-observability-callbacks.html">第 04 课 · 可观测性</a>　·
+    速查卡:<a href="../reference/config-yaml-cheatsheet.html">config.yaml 结构速查</a>
+    <div class="next-links">
+      <span>引用来源:
+        <a href="https://docs.litellm.ai/docs/proxy/caching">[1] Caching 官方文档</a>
+      </span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

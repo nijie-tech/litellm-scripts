@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第 04 课 · 可观测性:看见每次请求的花费与延迟</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <script src="../assets/quiz.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">LiteLLM Proxy 网关 · 第 04 课</p>
+  <h1>可观测性:用 callbacks 看见每次请求的花费与延迟</h1>
+
+  <div class="mission">
+    <b>这一课服务于你的使命:</b>生产网关跑起来后,你必须能回答"今天花了多少钱?哪个模型慢?哪把 key 在烧额度?"。
+    今天开 <code>litellm_settings.callbacks</code> 抽屉,把每次请求的<strong>花费、延迟、token、成败</strong>
+    自动吐到监控系统——出问题能查,花钱能算。
+  </div>
+
+  <h2>一、心智模型:callbacks 是"请求的旁路录像"</h2>
+  <p>
+    网关处理每个请求时,会把一份标准化记录(模型、token、<strong>花费</strong>、<strong>延迟</strong>、时间戳、元数据)
+    交给你登记的 <code>callbacks</code>,由它们转发到监控后端。你不改业务,只是在旁边"装了摄像头"。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/logging">[1]</a></sup>
+  </p>
+  <p>三个登记位都在 <code>litellm_settings</code> 里:</p>
+  <ul>
+    <li><code>success_callback</code> — 成功的请求往哪送。</li>
+    <li><code>failure_callback</code> — 失败的请求往哪送。</li>
+    <li><code>callbacks</code> — 成功+失败都送(很多集成用这个统一写法)。</li>
+  </ul>
+
+  <h2>二、关键洞察:两层可观测性,别只装一个</h2>
+  <div class="key-insight">
+    <span class="label">两层缺一不可</span>
+    • <b>聚合指标(Prometheus)</b> —— 趋势与告警。"过去 1 小时 QPS、错误率、各模型 p95 延迟、各 key 累计花费"。
+    用来<strong>盯大盘、设报警</strong>。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prometheus">[2]</a></sup><br>
+    • <b>单请求追踪(Langfuse)</b> —— 逐条排障。点开<strong>某一次</strong>调用看它的 prompt、用了哪个部署、花了多少、慢在哪。
+    用来<strong>查具体那次为什么贵/为什么慢</strong>。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/logging">[1]</a></sup><br>
+    口诀:<b>Prometheus 看森林,Langfuse 看树木。</b>
+  </div>
+
+  <h2>三、动手 A:Prometheus 大盘</h2>
+  <p>LiteLLM 内置 Prometheus 导出器,开启后网关自带一个 <code>GET /metrics</code> 端点供抓取:<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prometheus">[2]</a></sup></p>
+  <p class="filename">config.yaml</p>
+  <pre><code>litellm_settings:
+  callbacks: ["prometheus"]</code></pre>
+  <pre><code># 重启后直接看指标(无需额外服务即可验证端点)
+curl http://0.0.0.0:4000/metrics | head -40</code></pre>
+  <p class="note">
+    你会看到按 <b>model / key / team</b> 拆分的 spend、请求数、token、延迟、各部署剩余配额等。
+    生产里让 Prometheus 周期抓这个端点,再用 Grafana 出大盘 + 告警。
+  </p>
+
+  <h2>四、动手 B:Langfuse 逐条追踪</h2>
+  <p class="filename">config.yaml</p>
+  <pre><code>litellm_settings:
+  callbacks: ["prometheus", "langfuse"]   # 两层一起开</code></pre>
+  <pre><code>export LANGFUSE_PUBLIC_KEY="pk-..."
+export LANGFUSE_SECRET_KEY="sk-..."
+export LANGFUSE_HOST="https://cloud.langfuse.com"   # 自托管则填你的地址
+litellm --config config.yaml</code></pre>
+  <p>随便调几次网关,去 Langfuse 控制台就能看到每一条调用的花费、延迟、用到的部署与完整对话。</p>
+
+  <h3>生产隐私:记花费但不记内容</h3>
+  <p>
+    很多场景不能把用户 prompt 落到第三方。LiteLLM 可以<strong>关掉消息内容</strong>但<strong>保留花费/延迟统计</strong>:<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/logging">[1]</a></sup>
+  </p>
+  <pre><code>litellm_settings:
+  callbacks: ["langfuse"]
+  turn_off_message_logging: true     # 脱敏:只记元数据与花费,不记 prompt/回复</code></pre>
+
+  <h2>五、检索练习</h2>
+  <p>合上内容,凭记忆作答:</p>
+
+  <div class="quiz" data-explain="Prometheus 给聚合指标看大盘/告警;Langfuse 做单请求追踪逐条排障。两层互补。">
+    <p class="q">要排查"刚才那一次调用为什么特别慢",该看哪个?</p>
+    <button class="opt">Prometheus 的聚合大盘曲线</button>
+    <button class="opt" data-correct>Langfuse 的单请求逐条追踪</button>
+    <button class="opt">数据库里的虚拟 key 表</button>
+  </div>
+
+  <div class="quiz" data-explain="callbacks/success_callback/failure_callback 都属于 litellm_settings 这个全局行为抽屉。">
+    <p class="q">登记可观测性回调的 callbacks,写在哪个顶层段?</p>
+    <button class="opt">写在 router_settings 段里头</button>
+    <button class="opt" data-correct>写在 litellm_settings 段里头</button>
+    <button class="opt">写在每个 model_list 条目里</button>
+  </div>
+
+  <div class="quiz" data-explain="turn_off_message_logging 关掉 prompt/回复内容,但仍保留花费、token、延迟等元数据统计。">
+    <p class="q">turn_off_message_logging: true 的效果是?</p>
+    <button class="opt">彻底停掉所有日志与花费统计</button>
+    <button class="opt">只记内容但不再统计花费额度</button>
+    <button class="opt" data-correct>不记内容但保留花费延迟统计</button>
+  </div>
+
+  <div class="ask-teacher">
+    💬 <b>有疑问就问我。</b> Prometheus 抓不到指标、Langfuse 没数据、想按 key/team 分别配不同后端、
+    或想接 Datadog/OTel——把现象发我,我们继续拆。
+  </div>
+
+  <h2>下一步</h2>
+  <p>
+    <b>先读权威源</b>(本课首选阅读):
+    <a href="https://docs.litellm.ai/docs/proxy/logging">Logging / Callbacks 官方文档</a>
+    与 <a href="https://docs.litellm.ai/docs/proxy/prometheus">Prometheus 指标清单</a>。
+  </p>
+  <p>
+    <b>可见成果:</b>开启 <code>["prometheus"]</code>,<code>curl /metrics</code> 看到 spend/latency 指标;
+    (可选)接上 Langfuse 看到逐条追踪。做到后告诉我,<b>第 05 课</b>收尾整条主线:
+    把网关用 <strong>Docker + Postgres</strong> 打包成可上线的生产部署。
+  </p>
+
+  <div class="footer">
+    上一课:<a href="0003-load-balancing-fallbacks.html">第 03 课 · 负载均衡与 fallback</a>　·
+    速查卡:<a href="../reference/config-yaml-cheatsheet.html">config.yaml 结构速查</a>
+    <div class="next-links">
+      <span>引用来源:
+        <a href="https://docs.litellm.ai/docs/proxy/logging">[1] Logging 文档</a>
+        <a href="https://docs.litellm.ai/docs/proxy/prometheus">[2] Prometheus 文档</a>
+      </span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

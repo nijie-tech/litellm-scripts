@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第 02 课 · master_key 与虚拟 key:给每个应用发独立凭证</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <script src="../assets/quiz.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">LiteLLM Proxy 网关 · 第 02 课</p>
+  <h1>master_key 与虚拟 key:给每个应用发独立凭证、设预算与限流</h1>
+
+  <div class="mission">
+    <b>这一课服务于你的使命:</b>生产网关不能让所有应用共用一把真厂商 key。
+    今天你给网关装上"前台":一把管理总钥匙(<code>master_key</code>),再由它<strong>签发</strong>
+    一次性的虚拟 key——每个应用一把,各自限预算、限速率、限可用模型。某个应用泄漏或超支,
+    吊销那一把即可,真厂商 key 永不出网关。
+  </div>
+
+  <h2>一、为什么需要虚拟 key</h2>
+  <p>
+    第 01 课里,任何人只要够到 <code>:4000</code> 就能白嫖你的 OpenAI 额度——网关此时是"裸奔"的。
+    生产环境要的是:<b>一应用一凭证、可计费、可限额、可吊销</b>。LiteLLM 用两层凭证解决:
+  </p>
+  <div class="key-insight">
+    <span class="label">两层凭证</span>
+    • <code>master_key</code> —— 管理总钥匙,必须以 <code>sk-</code> 开头。<strong>只有它</strong>能签发/管理虚拟 key。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/virtual_keys">[1]</a></sup><br>
+    • <b>virtual key</b> —— 由 master_key 通过 <code>/key/generate</code> 现签现发,带预算/限速/模型白名单,发给具体应用当 Bearer token 用。<br>
+    类比:master_key 是<strong>总台保险柜钥匙</strong>,虚拟 key 是前台发给每位客人的<strong>房卡</strong>——能单独失效,丢了不影响保险柜。
+  </div>
+
+  <h2>二、关键前提:虚拟 key 需要数据库</h2>
+  <p>
+    这是今天最容易踩的坑:<code>master_key</code> 单独就能用(保护网关),但只要你想<strong>签发并存储</strong>
+    虚拟 key、记录它们的花费,就<strong>必须接一个 PostgreSQL</strong>,通过 <code>DATABASE_URL</code> 提供。
+    网关启动时会自动建表。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/virtual_keys">[1]</a></sup>
+  </p>
+  <p class="note">
+    记忆钩子:<b>master_key 在内存里就能验,虚拟 key 的预算/花费必须落库。</b>没有数据库 = 没有虚拟 key。
+  </p>
+
+  <h2>三、动手:三步发出第一把房卡</h2>
+  <ol class="steps">
+    <li>
+      <b>起一个 Postgres</b>(本地用 Docker 最快):
+      <pre><code>docker run -d --name litellm-db \
+  -e POSTGRES_PASSWORD=litellm \
+  -e POSTGRES_DB=litellm \
+  -p 5432:5432 postgres:16</code></pre>
+    </li>
+    <li>
+      <b>在 config.yaml 里开 general_settings 抽屉</b>,并把两个密钥放进环境变量:
+      <p class="filename">config.yaml(在第 01 课基础上追加)</p>
+      <pre><code>general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL</code></pre>
+      <pre><code>export LITELLM_MASTER_KEY="sk-master-自己起一个长随机串"
+export DATABASE_URL="postgresql://postgres:litellm@localhost:5432/litellm"
+litellm --config config.yaml</code></pre>
+    </li>
+    <li>
+      <b>用 master_key 签发一把虚拟 key</b>——只给某应用 <code>deepseek-chat</code>、月预算 $10、限速:
+      <pre><code>curl http://0.0.0.0:4000/key/generate \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "models": ["deepseek-chat"],
+    "max_budget": 10,
+    "rpm_limit": 60,
+    "duration": "30d",
+    "metadata": {"app": "demo-app"}
+  }'</code></pre>
+      返回里会有一把 <code>"key": "sk-..."</code> ——这就是发给应用的房卡。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/virtual_keys">[1]</a></sup>
+    </li>
+  </ol>
+
+  <h3>验证:用房卡调用(而不是 master_key)</h3>
+  <pre><code>curl http://0.0.0.0:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-刚才返回的虚拟key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"hi"}]}'</code></pre>
+  <p class="note">
+    试试两件事看护栏生效:① 把 <code>"model"</code> 换成 <code>"gpt-4o"</code>——会被拒,因为这把 key 的白名单里没有它。
+    ② 反复快打超过 <code>rpm_limit</code>——会触发限速。花费会自动累加进数据库。
+  </p>
+
+  <h2>四、检索练习</h2>
+  <p>合上内容,凭记忆作答:</p>
+
+  <div class="quiz" data-explain="master_key 是管理总钥匙,只有它能调 /key/generate 签发虚拟 key;虚拟 key 自己不能再签发。">
+    <p class="q">哪一把钥匙才能调用 /key/generate 签发新的虚拟 key?</p>
+    <button class="opt" data-correct>管理用的 master_key</button>
+    <button class="opt">任意一把虚拟 key</button>
+    <button class="opt">厂商原始 api_key</button>
+  </div>
+
+  <div class="quiz" data-explain="master_key 可在内存中校验;但签发/存储虚拟 key、记录花费必须有 PostgreSQL,靠 DATABASE_URL 提供。">
+    <p class="q">下面哪个能力一定要先接好 PostgreSQL 才能用?</p>
+    <button class="opt">用 master_key 保护住网关入口</button>
+    <button class="opt" data-correct>签发虚拟 key 并记录其花费</button>
+    <button class="opt">在 model_list 里新增一个模型</button>
+  </div>
+
+  <div class="quiz" data-explain="models 是该 key 的模型白名单,请求白名单外的模型会被拒,实现按 key 限制可用模型。">
+    <p class="q">签发时传的 "models": ["deepseek-chat"] 起什么作用?</p>
+    <button class="opt">设定该 key 默认温度参数</button>
+    <button class="opt">决定请求路由到哪台机器</button>
+    <button class="opt" data-correct>限定这把 key 能用的模型</button>
+  </div>
+
+  <div class="ask-teacher">
+    💬 <b>有疑问就问我。</b> 数据库连不上、<code>/key/generate</code> 返回 401、想按"团队"而不是"单 key"
+    分预算(LiteLLM 还有 user / team 层级)——把现象发我,我们继续拆。
+  </div>
+
+  <h2>下一步</h2>
+  <p>
+    <b>先读权威源</b>(本课首选阅读):
+    <a href="https://docs.litellm.ai/docs/proxy/virtual_keys">Virtual Keys 官方文档</a>——
+    看 <code>/key/generate</code> 的完整参数,以及 user/team 预算的分层模型。
+  </p>
+  <p>
+    <b>可见成果:</b>起好 Postgres,签发一把限模型+限预算的虚拟 key,用它调通、并亲眼看到白名单/限速护栏拦截。
+    做到后告诉我,<b>第 03 课</b>开 <code>router_settings</code> 抽屉:同名模型挂多个部署,做<strong>负载均衡 + fallback</strong>
+    ——这是你使命里"可靠性"的核心。
+  </p>
+
+  <div class="footer">
+    上一课:<a href="0001-first-proxy.html">第 01 课 · 启动第一个 Proxy</a>　·
+    速查卡:<a href="../reference/config-yaml-cheatsheet.html">config.yaml 结构速查</a>
+    <div class="next-links">
+      <span>引用来源:
+        <a href="https://docs.litellm.ai/docs/proxy/virtual_keys">[1] Virtual Keys 官方文档</a>
+      </span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

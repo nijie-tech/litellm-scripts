@@ -1,0 +1,57 @@
+# ───────────────────────────────────────────────────────────────
+# 中文语义路由 — config.yaml 参考写法(文件式部署用)
+#
+# 你现网是 db-model + 管理 API(不重启),实际部署请用 provision-smart-router.sh。
+# 本文件是"如果改用文件式 config.yaml 部署"的等价写法,供对照与讲解。
+#
+# 核心三件事:
+#   1) 加一个【中文】embedding 部署(走 openai/ 兼容通道接 SiliconFlow,LiteLLM 无原生 provider)
+#   2) auto_router_embedding_model 指向它(英文 embedding 会重蹈 RouteLLM 中文失灵覆辙)
+#   3) route 的 name = 目标 model_name;utterances 写中文真实说法
+# ───────────────────────────────────────────────────────────────
+
+model_list:
+  # —— 你已有的目标模型(节选;真实清单见 /model/info) ——
+  - model_name: deepseek/deepseek-v4-flash
+    litellm_params: { model: deepseek/deepseek-v4-flash, api_key: os.environ/DEEPSEEK_API_KEY }
+  - model_name: qwen3.7-plus
+    litellm_params: { model: openai/qwen3.7-plus, api_base: os.environ/DASHSCOPE_BASE, api_key: os.environ/DASHSCOPE_API_KEY }
+  - model_name: qwen3.7-max
+    litellm_params: { model: openai/qwen3.7-max, api_base: os.environ/DASHSCOPE_BASE, api_key: os.environ/DASHSCOPE_API_KEY }
+  - model_name: kimi-k2.7-code
+    litellm_params: { model: moonshot/kimi-k2.7-code, api_key: os.environ/MOONSHOT_API_KEY }
+
+  # —— ① 中文 embedding:SiliconFlow bge-m3,batch 8192(DashScope v4 只有 10,撑不起多例句) ——
+  #    LiteLLM 无原生 siliconflow provider → 用 openai/ 兼容通道 + api_base 即可。
+  - model_name: zh-embed
+    litellm_params:
+      model: openai/BAAI/bge-m3
+      api_base: https://api.siliconflow.cn/v1
+      api_key: os.environ/SILICONFLOW_API_KEY      # ← 生产用 env,切勿写死
+    model_info:
+      mode: embedding
+
+  # —— ② 语义路由器:调用方只打 model="smart-router",网关内部分流 ——
+  - model_name: smart-router
+    litellm_params:
+      model: auto_router/smart-router
+      auto_router_default_model: qwen3.7-plus       # 没命中阈值时兜底
+      auto_router_embedding_model: zh-embed         # ← 中文命门
+      # 路由规则:既可内联(下面 JSON 字符串),也可用 auto_router_config_path: zh_router.json
+      # route.name 必须等于上面某个 model_name。utterances/阈值拿真实流量持续调。
+      auto_router_config: >
+        {"routes":[
+          {"name":"deepseek/deepseek-v4-flash","score_threshold":0.30,
+           "utterances":["你好呀,在吗","今天天气怎么样","给我讲个笑话呗","随便聊聊天"]},
+          {"name":"qwen3.7-plus","score_threshold":0.30,
+           "utterances":["帮我把这段翻译成英文","总结这篇文章要点","解释下什么是HTTP缓存","帮我润色这段文案"]},
+          {"name":"kimi-k2.7-code","score_threshold":0.30,
+           "utterances":["帮我写个线程安全的LRU缓存","这段代码为什么报空指针","用numpy实现矩阵乘法","这个SQL怎么优化"]},
+          {"name":"qwen3.7-max","score_threshold":0.30,
+           "utterances":["设计千万级短链系统分析分库分表取舍","证明立方和等于求和的平方并归纳推导","权衡Kafka还是RabbitMQ的一致性与吞吐","比较Paxos和Raft的优劣"]}
+        ]}
+
+# 备注:
+# - 完整 34 条例句以 provision-smart-router.sh 为准(本文件为精简示意)。
+# - DashScope text-embedding-v4 中文质量也是头部,唯独 batch≤10 卡死多例句,故换 SiliconFlow。
+# - 网关迁国内后:聊天(DashScope)+ 路由 embedding(SiliconFlow)双双本地,延迟最优。

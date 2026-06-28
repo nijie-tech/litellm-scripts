@@ -1,0 +1,38 @@
+# ───────────────────────────────────────────────────────────
+# Qwen 模型单价片段 —— 贴进你服务器上的 config.yaml 的 model_list
+# 目的:让 LiteLLM 能算出每次请求成本,spend 才会涨,金额预算才能拦人。
+#
+# 单位:人民币(元)每 token。如此一来,budget 套餐里的 max_budget 数值 = 人民币额度。
+# 换算:元/百万token ÷ 1,000,000 = 元/token
+#
+# 用法:不要整段替换!只把下面每个模型的两行 *_cost_per_token
+#       加到你『已有的对应条目』的 litellm_params 里即可
+#       (api_key / api_base 用你现在的,别动)。
+# 改完重启网关:litellm --config <你的配置>.yaml
+# ───────────────────────────────────────────────────────────
+
+model_list:
+  - model_name: qwen3.7-max
+    litellm_params:
+      model: openai/qwen3.7-max            # ← 保持你现有的 model 串
+      api_base: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      api_key: os.environ/QWEN_API_KEY     # ← 用你现有的那个变量名
+      input_cost_per_token: 0.000012       # 12 元 / 百万 token
+      output_cost_per_token: 0.000036      # 36 元 / 百万 token
+
+  - model_name: qwen3.7-plus
+    litellm_params:
+      model: openai/qwen3.7-plus
+      api_base: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      api_key: os.environ/QWEN_API_KEY
+      input_cost_per_token: 0.00000288     # 2.88 元 / 百万 token
+      output_cost_per_token: 0.00001152    # 11.52 元 / 百万 token
+
+  - model_name: qwen3.6-plus
+    litellm_params:
+      model: openai/qwen3.6-plus
+      api_base: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+      api_key: os.environ/QWEN_API_KEY
+      # ⚠️ 占位:未查到 3.6-plus 官方单价,先按 3.7-plus 估;请用你账单实际单价替换
+      input_cost_per_token: 0.00000288     # 待确认
+      output_cost_per_token: 0.00001152    # 待确认

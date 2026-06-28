@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第 06 课 · C 端 Agent Gateway 的配置决策框架</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <script src="../assets/quiz.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">LiteLLM Proxy 网关 · 第 06 课(集大成)</p>
+  <h1>C 端 Agent Gateway 的配置决策框架</h1>
+
+  <div class="mission">
+    <b>这一课服务于你的使命:</b>你已掌握机制,现在要的是"对 C 端 agent 该怎么配、为什么"。
+    本课不再讲机制,而是给你一套<strong>决策框架</strong>:从 C 端产品的四个约束出发,推出每个配置块的取舍。
+    配套的浓缩成果是 → <a href="../reference/best-practices-c-end-gateway.html"><b>最佳实践参考卡</b></a>(长期回看用,本课结束请收藏)。
+  </div>
+
+  <h2>一、先认清:C 端 agent 给网关的四条约束</h2>
+  <p>所有最佳实践都从这四条推出来。记住约束,配置自然就有答案:</p>
+  <div class="key-insight">
+    <span class="label">四条约束 → 配置取向</span>
+    ① <b>你统一付费</b> → 必须按 <strong>end-user</strong> 算账、限额、防滥用。<br>
+    ② <b>消费者没耐心</b> → <strong>快失败 + 流式 + 缓存</strong>,延迟优先于"多试几次"。<br>
+    ③ <b>用户会因报错流失</b> → <strong>跨厂商 fallback</strong>、DB 抖动不掉线。<br>
+    ④ <b>面向公众要合规</b> → <strong>guardrails</strong> 脱敏/审核 + 不外泄对话内容。
+  </div>
+
+  <h2>二、逐块决策:为什么这么设</h2>
+
+  <h3>约束① 付费 → 成本与防滥用</h3>
+  <p>
+    关键动作只有一个却最容易漏:<strong>每次请求带 <code>"user": "&lt;你的用户ID&gt;"</code></strong>。
+    LiteLLM 用它按终端用户累计花费,无需给每个 C 端用户单独建 key。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/users">[1]</a></sup>
+    在此之上:全局 <code>max_end_user_budget</code> 兜底防烧穿;免费/付费用户用 <code>/budget/new</code> + <code>/customer/new</code> 给不同套餐。
+  </p>
+  <pre><code>// 你的 agent 调网关时,务必透传终端用户标识
+{"model":"chat-default","user":"u_88231","messages":[...]}</code></pre>
+  <p class="note"><b>虚拟 key vs end-user 的分工:</b>虚拟 key 是给"你这个 agent 应用"的一把凭证;
+  <code>user</code> 字段区分这把 key 背后的<strong>千千万万 C 端个人</strong>。两者叠加用。</p>
+
+  <h3>约束② 没耐心 → 延迟与流式</h3>
+  <p>
+    C 端的反直觉点:<strong>重试不是越多越好</strong>。重试会让用户干等,
+    所以 <code>num_retries</code> 设小(1~2),配合较短 <code>request_timeout</code>,失败就快速 fallback。
+    流式 <code>"stream": true</code> 原样透传让首 token 早出;高重复请求交给缓存毫秒级返回。
+  </p>
+
+  <h3>约束③ 怕流失 → 可靠性</h3>
+  <p>
+    让 OpenAI 与国内模型<strong>双向互为 fallback</strong>:任一家限流/抖动,另一家顶上,用户无感。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/reliability">[2]</a></sup>
+    再加 <code>allow_requests_on_db_unavailable: true</code>——DB 短暂抖动时网关仍放行请求,不会因为记账库挂了而拒绝服务。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prod">[3]</a></sup>
+  </p>
+
+  <h3>约束④ 要合规 → 内容护栏</h3>
+  <p>
+    <code>guardrails</code> 段挂 presidio 在 <code>pre_call</code> 把邮箱/卡号等 PII 脱敏;按需加 moderation 审违规。
+    时机记法:<b>pre_call 拦输入,post_call 查输出,during_call 并行不阻塞。</b><sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/guardrails/quick_start">[4]</a></sup>
+    再用 <code>turn_off_message_logging: true</code> 保证监控只记花费、不外泄对话。
+  </p>
+
+  <h2>三、两个一定要知道的"坑"</h2>
+  <ul>
+    <li><b>Redis 别用 <code>redis_url</code>。</b>生产文档明确:用 <code>host/port/password</code> 分开写,<code>redis_url</code> 约慢 80 RPS。
+      (这纠正了第 05 课的写法。)<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prod">[3]</a></sup></li>
+    <li><b><code>LITELLM_SALT_KEY</code> 设了就别改。</b>它用来加密落库的厂商凭证;改掉后已存的 key 解不开。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prod">[3]</a></sup></li>
+  </ul>
+
+  <h2>四、检索练习</h2>
+  <p>合上内容,凭记忆作答(都从"四条约束"推得出来):</p>
+
+  <div class="quiz" data-explain="产品方付费下,按 end-user 算账/限额全靠请求里的 user 字段;漏传就无法定位和限制具体用户。">
+    <p class="q">产品方付费时,防 C 端用户滥用最关键、最易漏的一步?</p>
+    <button class="opt">把全局缓存的 ttl 调到更长</button>
+    <button class="opt" data-correct>每次请求都带上 user 字段</button>
+    <button class="opt">给每个用户单独建虚拟 key</button>
+  </div>
+
+  <div class="quiz" data-explain="C 端要快失败:重试堆叠让用户干等,应设小 num_retries,失败就尽快 fallback,延迟优先。">
+    <p class="q">面向消费者,num_retries 的取向为什么是"设小"?</p>
+    <button class="opt">重试越多越省厂商的钱</button>
+    <button class="opt">大重试能提高缓存命中率</button>
+    <button class="opt" data-correct>多重试让用户干等,延迟优先</button>
+  </div>
+
+  <div class="quiz" data-explain="生产文档建议用 redis host/port/password 分开写,redis_url 约慢 80 RPS;这纠正了第 05 课。">
+    <p class="q">生产环境连 Redis,官方推荐的写法是?</p>
+    <button class="opt">统一用一个 redis_url 串</button>
+    <button class="opt" data-correct>用 host/port/password 分开写</button>
+    <button class="opt">两种写法性能完全一致</button>
+  </div>
+
+  <div class="quiz" data-explain="pre_call 在调用模型前检查并处理输入(如 PII 脱敏);post_call 才是检查模型输出。">
+    <p class="q">想在请求到达模型前就把 PII 脱敏,guardrail 的 mode 选?</p>
+    <button class="opt" data-correct>选 pre_call 在入站前处理</button>
+    <button class="opt">选 post_call 在出站后处理</button>
+    <button class="opt">选 during_call 并行处理</button>
+  </div>
+
+  <div class="ask-teacher">
+    💬 <b>有疑问就问我。</b> 想要我针对你 agent 的真实请求流给一份"逐行定制版 config.yaml"、
+    某个国内厂商的 guardrail/moderation 怎么接、或免费/付费分层套餐怎么落地——把细节发我,我们直接做。
+  </div>
+
+  <h2>下一步</h2>
+  <p>
+    <b>首选阅读:</b><a href="https://docs.litellm.ai/docs/proxy/prod">LiteLLM 生产最佳实践</a>
+    与 <a href="https://docs.litellm.ai/docs/proxy/users">End-user 预算</a> 官方文档。
+  </p>
+  <p>
+    <b>本课的成果是那张参考卡。</b>把
+    <a href="../reference/best-practices-c-end-gateway.html"><b>最佳实践参考卡</b></a>
+    打开,照"上线前检查清单"逐项过一遍你的网关——这就是你要的"配置最佳实践"落地版。
+    需要我帮你把它定制成贴合你 agent 的版本,随时说。
+  </p>
+
+  <div class="footer">
+    上一课:<a href="0005-caching-cost-latency.html">第 05 课 · 缓存</a>　·
+    <b>核心成果:</b><a href="../reference/best-practices-c-end-gateway.html">最佳实践参考卡</a>　·
+    <a href="../MISSION.md">MISSION.md</a>
+    <div class="next-links">
+      <span>来源:
+        <a href="https://docs.litellm.ai/docs/proxy/users">[1] End-user</a>
+        <a href="https://docs.litellm.ai/docs/proxy/reliability">[2] 可靠性</a>
+        <a href="https://docs.litellm.ai/docs/proxy/prod">[3] 生产</a>
+        <a href="https://docs.litellm.ai/docs/proxy/guardrails/quick_start">[4] Guardrails</a>
+      </span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

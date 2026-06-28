@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>速查 · C 端 Agent 的 LiteLLM Gateway 配置最佳实践</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <style>
+    .dim { display:flex; align-items:baseline; gap:0.5rem; }
+    .dim .tag { font-family:var(--mono); font-size:0.62rem; letter-spacing:0.1em; text-transform:uppercase;
+      background:var(--accent); color:#fff; padding:0.12rem 0.45rem; border-radius:3px; white-space:nowrap; }
+    table.bp { width:100%; border-collapse:collapse; font-size:0.85rem; margin:0.8rem 0; }
+    table.bp th, table.bp td { text-align:left; padding:0.45rem 0.4rem; border-bottom:1px solid var(--rule); vertical-align:top; }
+    table.bp th { color:var(--ink-faint); font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; }
+    .anti { background:#f7eaea; border-left:3px solid var(--bad); padding:0.7rem 1rem; border-radius:0 4px 4px 0; margin:0.6rem 0; font-size:0.88rem; }
+    .anti b { color:var(--bad); }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">速查卡 · Reference</p>
+  <h1>C 端 Agent 的 LiteLLM Gateway 配置最佳实践</h1>
+  <p class="note">
+    场景:自研 C 端 agent,LiteLLM 作 AI gateway,<b>产品方统一付费、单实例起步</b>。
+    这是长期回看用的浓缩卡。配套讲解见 <a href="../lessons/0006-best-practices-c-end.html">第 06 课</a>。
+    口诀仍是四抽屉:<b>model_list / litellm_settings / general_settings / router_settings</b>。
+  </p>
+
+  <h2>0 · 黄金法则</h2>
+  <ul>
+    <li><b>配置进 config.yaml,密钥进环境变量。</b>密钥一律 <code>os.environ/KEY</code>,绝不写死。</li>
+    <li><b>有状态的东西全部外置。</b>虚拟 key/花费 → Postgres;缓存/全局限流/多实例路由 → Redis。无状态进程才能横向扩展。</li>
+    <li><b>C 端要"快失败"。</b>消费者等不了——超时短、重试少、缓存多、fallback 稳,优先保住"秒回"和"不报错"。</li>
+    <li><b>一定带 <code>user</code> 字段。</b>产品方付费下,不传 end-user 标识 = 无法按用户防滥用、出事查不到人。</li>
+  </ul>
+
+  <h2>1 · 生产基线 config.yaml(带注释 · 可直接改用)</h2>
+  <p class="note">这是把下面四个维度拼成的一份完整范本。先理解整体,再看分维度细则。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prod">[1]</a></sup></p>
+  <pre><code>model_list:
+  # —— 主力:OpenAI(可挂多 key 做负载均衡:同名多条目) ——
+  - model_name: chat-default
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 500
+  # —— 备用/降本:国内模型,与主力互为 fallback ——
+  - model_name: chat-cn
+    litellm_params:
+      model: openai/deepseek-chat
+      api_base: https://api.deepseek.com
+      api_key: os.environ/DEEPSEEK_API_KEY
+
+litellm_settings:
+  # 可靠性
+  num_retries: 2                 # C 端:少重试,快失败
+  request_timeout: 60            # 单请求上限(秒)
+  fallbacks: [{"chat-default": ["chat-cn"]}, {"chat-cn": ["chat-default"]}]  # 互备
+  context_window_fallbacks: [{"chat-cn": ["chat-default"]}]
+  enable_pre_call_checks: true
+  # 成本护栏(全局兜底,防单个 end-user 烧穿)
+  max_end_user_budget: 5         # 每个 end-user 累计花费上限(USD)
+  # 可观测性
+  callbacks: ["prometheus"]      # /metrics 大盘;再按需加 "langfuse"
+  json_logs: true                # 结构化日志
+  set_verbose: false             # 生产关闭啰嗦日志
+  # 缓存(省钱降延迟)——注意用 host/port,不要 redis_url
+  cache: true
+  cache_params:
+    type: redis
+    host: os.environ/REDIS_HOST
+    port: os.environ/REDIS_PORT
+    password: os.environ/REDIS_PASSWORD
+    ttl: 600
+  # 隐私:第三方追踪只记花费不记内容(C 端合规)
+  turn_off_message_logging: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY    # sk- 开头
+  database_url: os.environ/DATABASE_URL        # 虚拟 key/花费落库
+  alerting: ["slack"]                          # 预算/异常告警
+  proxy_batch_write_at: 60                     # 花费批量写库,降 DB 压力
+  database_connection_pool_limit: 10
+  allow_requests_on_db_unavailable: true       # DB 抖动时仍能服务(C 端不掉线)
+
+router_settings:
+  routing_strategy: simple-shuffle             # 起步够用;延迟敏感可换 latency-based-routing
+  # 多实例时再开(单实例可省):
+  # redis_host: os.environ/REDIS_HOST
+  # redis_port: os.environ/REDIS_PORT
+  # redis_password: os.environ/REDIS_PASSWORD
+
+guardrails:
+  - guardrail_name: pii-mask
+    litellm_params:
+      guardrail: presidio        # 入站前对 PII 脱敏
+      mode: pre_call
+      pii_entities_config:
+        EMAIL_ADDRESS: MASK
+        CREDIT_CARD: MASK
+        PHONE_NUMBER: MASK</code></pre>
+
+  <p class="filename">必备环境变量</p>
+  <pre><code>export LITELLM_MODE=PRODUCTION          # 关掉 load_dotenv 等开发行为
+export LITELLM_LOG=ERROR                # 抑制框架 info 日志
+export LITELLM_MASTER_KEY=sk-...        # 管理总钥匙
+export LITELLM_SALT_KEY=sk-...          # 加密落库的厂商凭证,生产必设且勿改
+export DATABASE_URL=postgresql://...
+export REDIS_HOST=... REDIS_PORT=6379 REDIS_PASSWORD=...
+export OPENAI_API_KEY=... DEEPSEEK_API_KEY=...</code></pre>
+
+  <h2>2 · 分维度最佳实践</h2>
+
+  <div class="dim"><span class="tag">维度</span><h3 style="margin:0;">成本控制 &amp; 防滥用(产品方付费)</h3></div>
+  <table class="bp">
+    <tr><th>做法</th><th>怎么配</th><th>为什么</th></tr>
+    <tr><td>按 end-user 跟踪</td><td>每次请求体带 <code>"user": "&lt;你的用户ID&gt;"</code></td><td>不传就无法按用户算账/限额/封禁<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/users">[2]</a></sup></td></tr>
+    <tr><td>全局兜底预算</td><td><code>litellm_settings.max_end_user_budget</code></td><td>任一用户烧穿即被拦(401),防刷爆</td></tr>
+    <tr><td>分层套餐限额</td><td><code>/budget/new</code>(设 tpm/预算)→ <code>/customer/new</code> 绑定 user_id</td><td>免费/付费用户给不同 budget_id<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/users">[2]</a></sup></td></tr>
+    <tr><td>超额告警</td><td><code>general_settings.alerting: ["slack"]</code></td><td>预算/异常实时通知,别等账单才发现</td></tr>
+    <tr><td>降本路由</td><td>便宜模型作主力,贵模型作 fallback;开缓存</td><td>多数 C 端请求重复度高,缓存直接省钱</td></tr>
+  </table>
+  <div class="anti"><b>反模式:</b>所有 C 端用户共用一把虚拟 key 且不传 <code>user</code>。结果=无法定位滥用者、无法分层限额、被刷爆只能整体关停。</div>
+
+  <div class="dim"><span class="tag">维度</span><h3 style="margin:0;">延迟 &amp; 流式体验</h3></div>
+  <table class="bp">
+    <tr><th>做法</th><th>怎么配</th><th>为什么</th></tr>
+    <tr><td>流式透传</td><td>请求带 <code>"stream": true</code>(OpenAI 兼容,网关原样透传 SSE)</td><td>首 token 尽快出,C 端体感快</td></tr>
+    <tr><td>快失败</td><td><code>num_retries: 1~2</code> + 适中 <code>request_timeout</code></td><td>重试堆叠会让用户干等;宁可早 fallback</td></tr>
+    <tr><td>延迟路由</td><td>多部署时 <code>routing_strategy: latency-based-routing</code></td><td>自动避开当前慢的部署</td></tr>
+    <tr><td>缓存</td><td><code>cache: true</code> + redis</td><td>命中=毫秒级返回且零成本</td></tr>
+  </table>
+
+  <div class="dim"><span class="tag">维度</span><h3 style="margin:0;">可靠性容灾</h3></div>
+  <table class="bp">
+    <tr><th>做法</th><th>怎么配</th><th>为什么</th></tr>
+    <tr><td>跨厂商互备</td><td><code>fallbacks</code> 双向:OpenAI↔国内模型</td><td>任一家限流/宕机,业务无感切换<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/reliability">[3]</a></sup></td></tr>
+    <tr><td>超长上下文兜底</td><td><code>context_window_fallbacks</code> + <code>enable_pre_call_checks</code></td><td>prompt 超窗自动转大窗口模型,不报错</td></tr>
+    <tr><td>DB 抖动不掉线</td><td><code>allow_requests_on_db_unavailable: true</code></td><td>DB 短暂不可用时仍放行请求<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prod">[1]</a></sup></td></tr>
+    <tr><td>健康检查</td><td>给 LB/探针挂 <code>/health/liveliness</code></td><td>实例异常自动摘除</td></tr>
+  </table>
+
+  <div class="dim"><span class="tag">维度</span><h3 style="margin:0;">内容安全护栏</h3></div>
+  <table class="bp">
+    <tr><th>做法</th><th>怎么配</th><th>为什么</th></tr>
+    <tr><td>PII 脱敏</td><td><code>guardrails</code> + <code>guardrail: presidio</code>, <code>mode: pre_call</code></td><td>入站前屏蔽邮箱/卡号等,防泄漏<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/guardrails/quick_start">[4]</a></sup></td></tr>
+    <tr><td>内容审核</td><td>moderation / lakera / bedrock 等 guardrail</td><td>C 端 UGC 合规,拦截违规输入输出</td></tr>
+    <tr><td>执行时机</td><td><code>pre_call</code>(查输入)/ <code>post_call</code>(查输出)/ <code>during_call</code>(并行不阻塞)</td><td>按"拦输入还是拦输出"选时机<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/guardrails/quick_start">[4]</a></sup></td></tr>
+    <tr><td>不外泄内容</td><td><code>turn_off_message_logging: true</code></td><td>第三方监控只记花费/延迟,不记对话</td></tr>
+  </table>
+
+  <h2>3 · 通用生产基线(别漏)</h2>
+  <table class="bp">
+    <tr><th>项</th><th>设置</th></tr>
+    <tr><td>生产模式</td><td><code>LITELLM_MODE=PRODUCTION</code></td></tr>
+    <tr><td>日志</td><td><code>LITELLM_LOG=ERROR</code> + <code>json_logs: true</code> + <code>set_verbose: false</code></td></tr>
+    <tr><td>凭证加密</td><td><code>LITELLM_SALT_KEY</code> 必设、设后勿改(改了已落库的厂商 key 解不开)</td></tr>
+    <tr><td>写库压力</td><td><code>proxy_batch_write_at: 60</code> 批量写花费</td></tr>
+    <tr><td>连接池</td><td><code>database_connection_pool_limit: 10</code></td></tr>
+    <tr><td>镜像</td><td>用非 root 官方镜像;K8s 下单 pod 单 worker、按内存横向扩展</td></tr>
+    <tr><td>Redis</td><td><b>用 host/port/password,别用 redis_url</b>(后者约慢 80 RPS)<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/prod">[1]</a></sup></td></tr>
+  </table>
+
+  <h2>4 · 上线前检查清单</h2>
+  <ul>
+    <li>☐ 所有密钥走 <code>os.environ/</code>,仓库里无明文</li>
+    <li>☐ <code>master_key</code> + <code>salt_key</code> 已设为强随机且妥善保管</li>
+    <li>☐ 请求链路确实带上了 <code>user</code> 字段(端到端验一次)</li>
+    <li>☐ <code>max_end_user_budget</code> / 分层 budget 已设,并实测超额被拦(401)</li>
+    <li>☐ 故意改坏主力 key,验证 fallback 切到备用模型成功</li>
+    <li>☐ <code>/metrics</code> 能抓到 spend/latency;告警通道(Slack)实测能收到</li>
+    <li>☐ 缓存命中头 <code>x-litellm-cache-key</code> 出现;<code>/cache/ping</code> 通</li>
+    <li>☐ guardrail 实测能脱敏/拦截;<code>turn_off_message_logging</code> 已开</li>
+    <li>☐ <code>LITELLM_MODE=PRODUCTION</code> + <code>json_logs</code> + 非 root 镜像</li>
+  </ul>
+
+  <div class="footer">
+    讲解课:<a href="../lessons/0006-best-practices-c-end.html">第 06 课 · 决策框架</a>　·
+    config 结构:<a href="config-yaml-cheatsheet.html">速查卡</a>
+    <div class="next-links">
+      <span>来源:
+        <a href="https://docs.litellm.ai/docs/proxy/prod">[1] 生产最佳实践</a>
+        <a href="https://docs.litellm.ai/docs/proxy/users">[2] End-user 预算</a>
+        <a href="https://docs.litellm.ai/docs/proxy/reliability">[3] 可靠性</a>
+        <a href="https://docs.litellm.ai/docs/proxy/guardrails/quick_start">[4] Guardrails</a>
+      </span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

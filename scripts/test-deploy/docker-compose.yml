@@ -1,0 +1,46 @@
+# ════════════════════════════════════════════════════════════════
+# LiteLLM 测试环境 — proxy + Postgres(无 Redis)
+# 覆盖:虚拟 key / 预算 / spend / db-model(setup-smart-router.sh 的 API 工作流)
+#
+# 用法:
+#   1) cp .env.example .env  并填写(尤其各 provider key)
+#   2) docker compose up -d
+#   3) curl localhost:4000/health/readiness   # 看到 db=connected 即成功
+#   4) 回 scripts/ 跑 ./setup-smart-router.sh 建语义路由
+# ════════════════════════════════════════════════════════════════
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable   # 含 prisma 自动建表;DATABASE_URL 在则启动时迁移
+    ports:
+      - "4000:4000"
+    env_file: .env                               # provider key / master key / salt / siliconflow
+    environment:
+      # DATABASE_URL 由 POSTGRES_PASSWORD 拼出,避免和 .env 里重复写密码
+      - DATABASE_URL=postgresql://llmproxy:${POSTGRES_PASSWORD}@db:5432/litellm
+      - LITELLM_MODE=PRODUCTION
+      - LITELLM_LOG=ERROR
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmproxy -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  pgdata:

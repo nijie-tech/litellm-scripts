@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>第 03 课 · 负载均衡与 fallback:让网关在故障下不掉线</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+  <script src="../assets/quiz.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">LiteLLM Proxy 网关 · 第 03 课</p>
+  <h1>负载均衡与 fallback:让网关在故障下不掉线</h1>
+
+  <div class="mission">
+    <b>这一课服务于你的使命:</b>生产网关的命脉是"某个模型限流/挂了,业务不能跟着挂"。
+    今天开 <code>router_settings</code> 抽屉,学会两件事:把同一个模型名摊到<strong>多个部署</strong>上分摊压力(负载均衡),
+    以及当首选模型失败时<strong>自动切到备用模型</strong>(fallback)——比如 DeepSeek 限流就兜底到 OpenAI。
+  </div>
+
+  <h2>一、负载均衡:同名,多部署</h2>
+  <p>
+    还记得第 01 课的间接关系吗?<code>model_name</code> 是对外名。今天把它推到极致:
+    <strong>多个 <code>model_list</code> 条目共用同一个 <code>model_name</code></strong>,LiteLLM 就会把发往这个名字的流量
+    <strong>分摊</strong>到这些部署上。<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/reliability">[1]</a></sup>
+  </p>
+  <div class="key-insight">
+    <span class="label">核心抽象</span>
+    一个 <code>model_name</code> = 一个<strong>逻辑模型</strong>;它背后可以挂 N 个<strong>物理部署</strong>
+    (不同 key、不同区域、甚至不同厂商)。客户端只认那个名字,扩容/容灾全在配置里完成。
+  </div>
+  <p class="filename">config.yaml — 两个 key 摊到同一个逻辑名</p>
+  <pre><code>model_list:
+  - model_name: gpt-4o                 # 逻辑名
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_KEY_A
+      rpm: 100                         # 这个部署的配额
+  - model_name: gpt-4o                 # 同名!第二个部署
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_KEY_B
+      rpm: 100</code></pre>
+
+  <h3>选择路由策略</h3>
+  <p>流量怎么摊,由 <code>router_settings.routing_strategy</code> 决定:<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/reliability">[1]</a></sup></p>
+  <ul>
+    <li><code>simple-shuffle</code> — 默认,按权重随机。够用、最省心。</li>
+    <li><code>least-busy</code> — 发给当前在途请求最少的部署。</li>
+    <li><code>latency-based-routing</code> — 发给近期最快的部署。</li>
+    <li><code>usage-based-routing</code> — 按已用 token 量避开快触顶的部署。</li>
+  </ul>
+  <pre><code>router_settings:
+  routing_strategy: simple-shuffle</code></pre>
+
+  <h2>二、重试 vs fallback:两种不同的"再来一次"</h2>
+  <div class="key-insight">
+    <span class="label">别混淆</span>
+    • <b>retry(重试)</b> = <strong>同一个逻辑模型</strong>再试几次(会换到同名的其它部署)。治"偶发抖动"。<br>
+    • <b>fallback(兜底)</b> = 重试都失败后,<strong>切到另一个模型名</strong>。治"这个模型整体不可用"。<br>
+    顺序:先在 <code>gpt-4o</code> 的各部署间 <code>num_retries</code> 次重试 → 还不行 → 按 fallback 切到备用模型。
+  </div>
+  <p>
+    两者都写在 <code>litellm_settings</code> 里。<code>fallbacks</code> 是一个"主模型 → 备用模型列表"的映射:<sup class="cite"><a href="https://docs.litellm.ai/docs/proxy/reliability">[1]</a></sup>
+  </p>
+  <p class="filename">config.yaml — 重试 + 兜底</p>
+  <pre><code>litellm_settings:
+  num_retries: 3                 # 每个逻辑模型失败前重试次数
+  request_timeout: 30            # 单请求超时(秒)
+  fallbacks: [{"gpt-4o": ["deepseek-chat"]}]   # gpt-4o 不行就切 deepseek-chat
+  # 提示词超长则换大窗口模型(需开 enable_pre_call_checks)
+  context_window_fallbacks: [{"deepseek-chat": ["gpt-4o"]}]
+  enable_pre_call_checks: true</code></pre>
+  <p class="note">
+    生产实用搭配:OpenAI 与国内模型<strong>互为 fallback</strong>。任意一家限流/抖动,业务自动走另一家,
+    用户无感。这正是你使命里"可靠性"的落地形态。
+  </p>
+
+  <h2>三、动手验证 fallback 真的生效</h2>
+  <ol class="steps">
+    <li>把上面的 <code>fallbacks</code> 写进 config,<b>故意</b>把 <code>gpt-4o</code> 的 <code>api_key</code> 改成一个无效串。</li>
+    <li>重启网关,正常请求 <code>"model":"gpt-4o"</code>。</li>
+    <li>观察:gpt-4o 调用失败 → 自动切到 <code>deepseek-chat</code> 并成功返回。看网关日志能看到这次切换。</li>
+  </ol>
+  <pre><code>curl http://0.0.0.0:4000/v1/chat/completions \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+# 期望:尽管 gpt-4o 的 key 是坏的,仍拿到回复(来自 deepseek-chat)</code></pre>
+
+  <h2>四、检索练习</h2>
+  <p>合上内容,凭记忆作答:</p>
+
+  <div class="quiz" data-explain="多个 model_list 条目共用同一个 model_name,LiteLLM 就把该名字的流量分摊到这些部署,实现负载均衡。">
+    <p class="q">要对一个模型做负载均衡,配置上的关键动作是?</p>
+    <button class="opt">给它单独设一个高 rpm 上限</button>
+    <button class="opt" data-correct>多个条目共用同一 model_name</button>
+    <button class="opt">把 routing 策略关掉就行了</button>
+  </div>
+
+  <div class="quiz" data-explain="retry 是在同一个逻辑模型(及其同名部署)上再试;fallback 是重试失败后切到另一个模型名。">
+    <p class="q">num_retries 和 fallbacks 的本质区别是?</p>
+    <button class="opt">前者切别的模型,后者重试本模型</button>
+    <button class="opt" data-correct>前者重试本模型,后者切别的模型</button>
+    <button class="opt">两者完全等价,只是写法不同</button>
+  </div>
+
+  <div class="quiz" data-explain="fallbacks 是『主模型名 → 备用模型名列表』的映射,写在 litellm_settings 里。">
+    <p class="q">fallbacks 这条配置,正确的形态与位置是?</p>
+    <button class="opt">一串部署地址,放 model_list 里</button>
+    <button class="opt">一个路由策略,放 router_settings</button>
+    <button class="opt" data-correct>主→备模型映射,放 litellm_settings</button>
+  </div>
+
+  <div class="ask-teacher">
+    💬 <b>有疑问就问我。</b> fallback 没触发、想让"超长上下文自动转大模型"、想按 key 设不同重试策略、
+    或多实例部署时路由状态要不要走 Redis——把场景发我,我们继续拆。
+  </div>
+
+  <h2>下一步</h2>
+  <p>
+    <b>先读权威源</b>(本课首选阅读):
+    <a href="https://docs.litellm.ai/docs/proxy/reliability">Reliability / Fallbacks 官方文档</a>——
+    重点看各 <code>routing_strategy</code> 的取舍,以及多实例下用 Redis 共享路由状态。
+  </p>
+  <p>
+    <b>可见成果:</b>把 gpt-4o 的 key 改坏,仍能靠 fallback 拿到回复——亲眼确认自动切换。
+    做到后告诉我,<b>第 04 课</b>开 <code>litellm_settings.callbacks</code>:把每次请求的<strong>花费与延迟</strong>
+    打到日志/Prometheus/Langfuse——你使命里的"可观测性"。
+  </p>
+
+  <div class="footer">
+    上一课:<a href="0002-virtual-keys-budgets.html">第 02 课 · 虚拟 key</a>　·
+    速查卡:<a href="../reference/config-yaml-cheatsheet.html">config.yaml 结构速查</a>
+    <div class="next-links">
+      <span>引用来源:
+        <a href="https://docs.litellm.ai/docs/proxy/reliability">[1] Reliability 官方文档</a>
+      </span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

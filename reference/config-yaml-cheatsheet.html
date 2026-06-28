@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>速查 · LiteLLM config.yaml 结构</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<div class="wrap">
+
+  <p class="kicker">速查卡 · Reference</p>
+  <h1>config.yaml 结构速查</h1>
+  <p class="note">
+    压缩版,供随时回看。详细字段见官方
+    <a href="https://docs.litellm.ai/docs/proxy/config_settings">Config Settings</a>。
+    口诀:<b>模型 → 全局 → 网关 → 路由</b>。
+  </p>
+
+  <h2>四个顶层抽屉</h2>
+  <table style="width:100%; border-collapse:collapse; font-size:0.9rem;">
+    <tr style="border-bottom:1px solid var(--rule); text-align:left;">
+      <th style="padding:0.5rem 0.4rem;">段</th>
+      <th style="padding:0.5rem 0.4rem;">管什么</th>
+      <th style="padding:0.5rem 0.4rem;">典型字段</th>
+    </tr>
+    <tr style="border-bottom:1px solid var(--rule);">
+      <td style="padding:0.5rem 0.4rem;"><code>model_list</code></td>
+      <td style="padding:0.5rem 0.4rem;">有哪些模型、怎么连</td>
+      <td style="padding:0.5rem 0.4rem;"><code>model_name</code>, <code>litellm_params</code></td>
+    </tr>
+    <tr style="border-bottom:1px solid var(--rule);">
+      <td style="padding:0.5rem 0.4rem;"><code>litellm_settings</code></td>
+      <td style="padding:0.5rem 0.4rem;">全局行为</td>
+      <td style="padding:0.5rem 0.4rem;"><code>cache</code>, <code>callbacks</code>, <code>request_timeout</code></td>
+    </tr>
+    <tr style="border-bottom:1px solid var(--rule);">
+      <td style="padding:0.5rem 0.4rem;"><code>general_settings</code></td>
+      <td style="padding:0.5rem 0.4rem;">网关自身</td>
+      <td style="padding:0.5rem 0.4rem;"><code>master_key</code>, <code>database_url</code></td>
+    </tr>
+    <tr style="border-bottom:1px solid var(--rule);">
+      <td style="padding:0.5rem 0.4rem;"><code>router_settings</code></td>
+      <td style="padding:0.5rem 0.4rem;">路由/可靠性</td>
+      <td style="padding:0.5rem 0.4rem;"><code>routing_strategy</code>, <code>fallbacks</code>, <code>num_retries</code></td>
+    </tr>
+  </table>
+
+  <h2>model_list 一项的解剖</h2>
+  <pre><code>- model_name: gpt-4o              # ① 对外名(客户端 "model" 写这个)
+  litellm_params:
+    model: openai/gpt-4o          # ② 真实串:提供商/模型
+    api_key: os.environ/OPENAI_API_KEY   # ③ 从环境变量读,别写死
+    api_base: https://...         # ④ 自定义 endpoint(国内/兼容模型必填)
+    rpm: 100                      # ⑤ 可选:每分钟请求上限
+    tpm: 100000                   # ⑤ 可选:每分钟 token 上限</code></pre>
+
+  <h2>常用 provider 前缀(model 字段)</h2>
+  <pre><code>openai/gpt-4o                 # OpenAI
+anthropic/claude-3-5-sonnet   # Anthropic
+openai/deepseek-chat          # OpenAI 兼容(配 api_base 指向厂商)
+gemini/gemini-1.5-pro         # Google</code></pre>
+  <p class="note">国内模型基本走 <code>openai/&lt;模型&gt;</code> + <code>api_base</code> 这条兼容通法;
+  个别厂商有专属前缀,逐个实测后补到这里。</p>
+
+  <h2>启动 & 调用</h2>
+  <pre><code># 安装
+pip install 'litellm[proxy]'
+
+# 启动(默认 0.0.0.0:4000)
+litellm --config config.yaml
+
+# 调用(OpenAI 兼容)
+curl http://0.0.0.0:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'</code></pre>
+
+  <div class="footer">
+    回到 <a href="../lessons/0001-first-proxy.html">第 01 课</a>　·
+    官方 <a href="https://docs.litellm.ai/docs/proxy/config_settings">Config Settings</a>
+  </div>
+
+</div>
+</body>
+</html>
