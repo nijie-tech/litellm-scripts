@@ -49,7 +49,11 @@ miss=()
 for k in DEEPSEEK_API_KEY MOONSHOT_API_KEY DASHSCOPE_API_KEY SILICONFLOW_API_KEY; do
   [[ -n "${!k:-}" ]] || miss+=("$k")
 done
-[[ ${#miss[@]} -eq 0 ]] || die "这些 key 还没填(编辑 $ENVF):${miss[*]}"
+if [[ ${#miss[@]} -ne 0 ]]; then
+  warn "以下 key 未填,对应模型/路由将不可用(可后续补到 $ENVF):${miss[*]}"
+  [[ -n "${SILICONFLOW_API_KEY:-}" ]] || die "SILICONFLOW_API_KEY 是语义路由必需项,必须填。"
+  [[ -n "${DASHSCOPE_API_KEY:-}" ]]   || die "DASHSCOPE_API_KEY 缺失:默认兜底模型 qwen3.7-plus 用它,必须填。"
+fi
 
 # ── 3. 起容器 ──
 say "拉起容器(proxy + postgres)..."

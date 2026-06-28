@@ -2,20 +2,21 @@
 
 LiteLLM 网关运维脚本 + 中文语义路由 + 一键测试环境部署。
 
-## 一键起测试环境
+## 一键起测试环境(交互式引导,推荐)
 
 ```bash
 git clone https://github.com/nijie-tech/litellm-scripts.git
 cd litellm-scripts
-
-./up.sh        # ① 首次:生成 .env(含随机 master/salt),提示填 provider key
-# 编辑 scripts/test-deploy/.env,填 DEEPSEEK/MOONSHOT/DASHSCOPE/SILICONFLOW 四个 key
-./up.sh        # ② 再跑:起容器 → 等就绪 → 建中文语义路由 → 冒烟测试
+./install.sh        # 全程引导:检测依赖→缺啥问装啥→控制台输入 provider key→起服务
 ```
+
+`install.sh` 会:检测并(经确认)用阿里云源装 docker/jq/curl/openssl → 控制台输入 4 个 provider key(不回显)→ 自动生成 master/salt/PG 密码 → 起容器 → 建中文语义路由 → 冒烟测试。
 
 跑完后:调用方打 `model="smart-router-v1"` 即按中文复杂度自动分流。
 
-> 没装 docker?国内走阿里云源(见 `up.sh` 提示)。镜像拉不动 ghcr.io?在 `scripts/test-deploy/.env` 取消注释 `LITELLM_IMAGE` 换镜像。
+### 进阶:非交互方式
+
+已装好 docker 且想手填 .env,可直接用 `./up.sh`(首跑生成 .env 骨架,填好 provider key 再跑一次)。
 
 ## 目录
 
