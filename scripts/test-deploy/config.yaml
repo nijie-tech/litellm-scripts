@@ -1,39 +1,64 @@
 # ════════════════════════════════════════════════════════════════
 # LiteLLM 测试环境 config.yaml
-# 这里只放【基础聊天模型】(从 config 启动即加载);embedding 与语义路由器
-# 由 setup-smart-router.sh 通过 API 写入 DB(store_model_in_db: true 才允许)。
+# 基础聊天模型从这里启动加载;embedding(zh-embed)与语义路由器由
+# setup-smart-router.sh 经 API 写入 DB(store_model_in_db: true)。
 #
-# ⚠️ 下面 4 个 model_name 必须和 scripts/smart-router-routes.json 的 route.name 一致,
-#    否则 setup 脚本预检会报"目标模型缺失"。provider/base 按你真实接入填(这里是占位)。
+# ⚠️ 模型名要和 scripts/smart-router-routes.json 的 route.name 对齐。
+# ⚠️ 关于 api_base:线上网关 /model/info 未暴露聊天模型的 base,故:
+#    - deepseek / moonshot:用 litellm 内置 provider(无需 base,凭默认端点)——可靠
+#    - qwen:用 openai/ 兼容通道 + DASHSCOPE_BASE(默认填实测到的阿里 MaaS 端点)
+#      若你新环境用的是标准 DashScope,把 DASHSCOPE_BASE 改成
+#      https://dashscope.aliyuncs.com/compatible-mode/v1 即可。
 # ════════════════════════════════════════════════════════════════
 model_list:
+  # ── DeepSeek(内置 provider) ──
   - model_name: deepseek/deepseek-v4-flash
     litellm_params:
       model: deepseek/deepseek-v4-flash
       api_key: os.environ/DEEPSEEK_API_KEY
+  - model_name: deepseek/deepseek-v4-pro
+    litellm_params:
+      model: deepseek/deepseek-v4-pro
+      api_key: os.environ/DEEPSEEK_API_KEY
 
+  # ── 通义千问(openai 兼容通道,base 走 env;模型 id 需与你 DashScope 可用项一致) ──
   - model_name: qwen3.7-plus
     litellm_params:
-      model: openai/qwen3.7-plus                # openai/ 兼容通道接 DashScope
+      model: openai/qwen3.7-plus
       api_base: os.environ/DASHSCOPE_BASE
       api_key: os.environ/DASHSCOPE_API_KEY
-
   - model_name: qwen3.7-max
     litellm_params:
       model: openai/qwen3.7-max
       api_base: os.environ/DASHSCOPE_BASE
       api_key: os.environ/DASHSCOPE_API_KEY
+  - model_name: qwen3.6-plus
+    litellm_params:
+      model: openai/qwen3.6-plus
+      api_base: os.environ/DASHSCOPE_BASE
+      api_key: os.environ/DASHSCOPE_API_KEY
 
+  # ── Kimi / Moonshot(内置 provider) ──
   - model_name: kimi-k2.7-code
     litellm_params:
       model: moonshot/kimi-k2.7-code
       api_key: os.environ/MOONSHOT_API_KEY
+  - model_name: moonshot/kimi-k2.5
+    litellm_params:
+      model: moonshot/kimi-k2.5
+      api_key: os.environ/MOONSHOT_API_KEY
+  - model_name: moonshot/kimi-k2.6
+    litellm_params:
+      model: moonshot/kimi-k2.6
+      api_key: os.environ/MOONSHOT_API_KEY
+
+  # 注:图片模型 dashscope/qwen-image-2.0 走 pass-through 端点(非标准 model 条目),
+  #     不在此 config;如需迁移见 NOTES.md「图片模型」段(/config/pass_through_endpoint)。
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL
   store_model_in_db: true            # ← 关键:允许 /model/new 把 embedding+router 落库
-  # 测试环境:DB 偶发不可用也别整体拒绝(可选)
   allow_requests_on_db_unavailable: false
 
 litellm_settings:
@@ -41,4 +66,3 @@ litellm_settings:
   request_timeout: 60
   drop_params: true                  # 上游不认的参数自动丢,省得 400
   json_logs: true
-  # 测试环境不开缓存(无 Redis);要开再加 cache 配置
