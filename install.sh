@@ -118,18 +118,30 @@ else
   read_secret MOONSHOT_API_KEY
   read_secret DASHSCOPE_API_KEY
   read_secret SILICONFLOW_API_KEY
-  # DashScope base 允许改默认
-  local_base="https://dashscope.aliyuncs.com/compatible-mode/v1"
-  read -rp "  DASHSCOPE_BASE(回车用默认 $local_base): " b; set_kv DASHSCOPE_BASE "${b:-$local_base}"
+  # DashScope base:默认填线上实测的阿里云 MaaS(token-plan)端点;标准 DashScope 用户可改
+  local_base="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+  say "  DASHSCOPE_BASE 默认 = 阿里云 MaaS(token-plan)端点;标准 DashScope 请填 https://dashscope.aliyuncs.com/compatible-mode/v1"
+  read -rp "  DASHSCOPE_BASE(回车用默认): " b; set_kv DASHSCOPE_BASE "${b:-$local_base}"
 
-  # ghcr 镜像
-  if ask_yn "国内拉取 ghcr.io 常失败,是否启用镜像加速?" Y; then
+  # 镜像加速(国内必备):ghcr(litellm 镜像)+ Docker Hub(postgres 等)
+  if ask_yn "国内拉取镜像常失败,是否启用镜像加速(ghcr + Docker Hub)?" Y; then
+    # ① ghcr → 南大镜像(litellm 镜像走 .env 的 LITELLM_IMAGE)
     if grep -q '^#\? *LITELLM_IMAGE=' "$ENVF"; then
       sed -i 's|^#\? *LITELLM_IMAGE=.*|LITELLM_IMAGE=ghcr.nju.edu.cn/berriai/litellm:main-stable|' "$ENVF"
     else
       echo "LITELLM_IMAGE=ghcr.nju.edu.cn/berriai/litellm:main-stable" >> "$ENVF"
     fi
-    ok "已启用 ghcr 镜像(ghcr.nju.edu.cn)"
+    # ② Docker Hub → daemon.json 的 registry-mirrors(治 postgres 等 docker.io 拉取超时)
+    DJ=/etc/docker/daemon.json; MIRROR="https://docker.nju.edu.cn"
+    if [[ -f "$DJ" ]]; then
+      $SUDO cp "$DJ" "${DJ}.bak" 2>/dev/null || true
+      merged="$($SUDO cat "$DJ" | jq --arg m "$MIRROR" '. + {"registry-mirrors": (((.["registry-mirrors"] // []) + [$m]) | unique)}')"
+    else
+      merged="$(jq -n --arg m "$MIRROR" '{"registry-mirrors":[$m]}')"
+    fi
+    echo "$merged" | $SUDO tee "$DJ" >/dev/null
+    $SUDO systemctl restart docker && sleep 2
+    ok "已启用镜像加速(ghcr.nju.edu.cn + Docker Hub: docker.nju.edu.cn)并重启 docker"
   fi
 fi
 
