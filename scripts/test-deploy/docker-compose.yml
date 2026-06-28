@@ -10,7 +10,7 @@
 # ════════════════════════════════════════════════════════════════
 services:
   litellm:
-    image: ghcr.io/berriai/litellm:main-stable   # 含 prisma 自动建表;DATABASE_URL 在则启动时迁移
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm:main-stable}   # 国内拉不动改 .env 的 LITELLM_IMAGE
     ports:
       - "4000:4000"
     env_file: .env                               # provider key / master key / salt / siliconflow
